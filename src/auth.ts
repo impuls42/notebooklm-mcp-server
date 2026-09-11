@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import os from 'os';
 import { BASE_URL } from './constants.js';
+import { CookieJar, parseCookieString, serializeJar } from './cookies.js';
 
 const BASE_HOST = new URL(BASE_URL).host;
 
@@ -13,23 +14,6 @@ const BASE_HOST = new URL(BASE_URL).host;
 const NOTEBOOK_HOSTS = [BASE_HOST, 'notebook.google.com', 'notebooklm.google.com'];
 const isNotebookHost = (host: string): boolean => NOTEBOOK_HOSTS.includes(host);
 
-function parseCookieString(cookieString: string): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const part of cookieString.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq <= 0) continue;
-    const name = part.substring(0, eq).trim();
-    const value = part.substring(eq + 1).trim();
-    if (name) map.set(name, value);
-  }
-  return map;
-}
-
-function serializeCookieMap(map: Map<string, string>): string {
-  return Array.from(map.entries())
-    .map(([name, value]) => `${name}=${value}`)
-    .join('; ');
-}
 
 export class AuthManager {
   private authPath: string;
@@ -201,13 +185,13 @@ export class AuthManager {
    * inherit cookies from a previously authenticated account.
    */
   saveCookies(cookieString: string, options: { replace?: boolean } = {}): void {
-    const merged = options.replace ? new Map<string, string>() : this.readStoredCookies();
-    for (const [name, value] of parseCookieString(cookieString)) {
-      merged.set(name, value);
+    const merged: CookieJar = options.replace ? new Map() : this.readStoredCookies();
+    for (const [name, entry] of parseCookieString(cookieString)) {
+      merged.set(name, entry);
     }
 
     const authData = {
-      cookies: serializeCookieMap(merged),
+      cookies: serializeJar(merged),
       updatedAt: new Date().toISOString()
     };
 
@@ -221,7 +205,7 @@ export class AuthManager {
   /**
    * Cookies currently on disk, or an empty jar if there are none to read.
    */
-  private readStoredCookies(): Map<string, string> {
+  private readStoredCookies(): CookieJar {
     try {
       const data = JSON.parse(fs.readFileSync(this.authPath, 'utf-8'));
       return parseCookieString(String(data.cookies || ''));
@@ -260,12 +244,15 @@ export class AuthManager {
     // auth startup path unless a validation actually runs.
     const { NotebookLMClient, AuthenticationError } = await import('./client.js');
     const client = new NotebookLMClient(cookies);
-    // Persist anything the session pickup earns along the way, notably the
-    // host-scoped OSID cookie Google grants mid-redirect, so the server does
-    // not have to re-acquire it on first use.
-    client.setCookieSaver((refreshed) => this.saveCookies(refreshed));
+    // Hold anything the session pickup earns along the way, notably the
+    // host-scoped OSID cookie Google grants mid-redirect, and commit it only
+    // once the API has accepted the session. A run that ends in rejection
+    // leaves the stored jar exactly as it found it.
+    let earned: string | null = null;
+    client.setCookieSaver((refreshed) => { earned = refreshed; });
     try {
       const notebooks = await client.listNotebooks();
+      if (earned) this.saveCookies(earned);
       const first = notebooks[0]?.title;
       return {
         status: 'ok',

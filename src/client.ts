@@ -6,6 +6,9 @@ import {
   EXPORT_FORMAT_CODES, CHAT_GOAL_CODES, CHAT_RESPONSE_LENGTH_CODES,
   SHARE_ACCESS, SHARE_PERMISSION_CODES,
 } from './constants.js';
+import {
+  CookieJar, parseCookieString, serializeJar, cookieHeaderFor, mergeSetCookies,
+} from './cookies.js';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -64,56 +67,9 @@ function studioStatusToString(code: any): string {
   }
 }
 
+const ACCOUNTS_HOST = 'accounts.google.com';
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
-
-function parseCookieString(cookieString: string): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const part of cookieString.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq <= 0) continue;
-    const name = part.substring(0, eq).trim();
-    const value = part.substring(eq + 1).trim();
-    if (name) map.set(name, value);
-  }
-  return map;
-}
-
-function serializeCookieMap(map: Map<string, string>): string {
-  return Array.from(map.entries())
-    .map(([name, value]) => `${name}=${value}`)
-    .join('; ');
-}
-
-/**
- * Cookies Google scopes to the service host itself. A browser never sends
- * these to accounts.google.com, and Google rejects requests that do.
- */
-const NOTEBOOK_HOST_SCOPED = ['OSID', '__Secure-OSID'];
-
-function cookiesForHost(jar: Map<string, string>, host: string): Map<string, string> {
-  if (host === new URL(BASE_URL).host) return jar;
-  const scoped = new Map(jar);
-  for (const name of NOTEBOOK_HOST_SCOPED) scoped.delete(name);
-  return scoped;
-}
-
-/**
- * Fold a response's Set-Cookie headers into a jar, skipping deletions.
- */
-function mergeSetCookies(jar: Map<string, string>, headers: string[]): boolean {
-  let changed = false;
-  for (const header of headers) {
-    const pair = header.split(';')[0];
-    const eq = pair.indexOf('=');
-    if (eq <= 0) continue;
-    const name = pair.substring(0, eq).trim();
-    const value = pair.substring(eq + 1).trim();
-    if (!name || !value || value === '""') continue;
-    jar.set(name, value);
-    changed = true;
-  }
-  return changed;
-}
 
 export class NotebookLMClient {
   private client: AxiosInstance;
@@ -167,7 +123,7 @@ export class NotebookLMClient {
     this.cookieSaver = saver;
   }
 
-  private currentCookies(): Map<string, string> {
+  private currentCookies(): CookieJar {
     return parseCookieString(String(this.client.defaults.headers['Cookie'] || ''));
   }
 
@@ -201,34 +157,44 @@ export class NotebookLMClient {
     maxHops = 10
   ): Promise<{ status: number; data: any; finalUrl: string }> {
     const jar = this.currentCookies();
-    const before = serializeCookieMap(jar);
+    const before = serializeJar(jar);
     let url = startUrl;
 
-    for (let hop = 0; hop < maxHops; hop++) {
-      const host = new URL(url).host;
-      const response = await this.client.get(url, {
-        baseURL: undefined,
-        headers: {
-          ...headers,
-          'Cookie': serializeCookieMap(cookiesForHost(jar, host)),
-        },
-        maxRedirects: 0,
-        validateStatus: (status) => status >= 200 && status < 400,
-      });
+    // Cookies earned partway through are worth keeping even if a later hop
+    // throws, so the jar is flushed on every exit from this method.
+    try {
+      for (let hop = 0; hop < maxHops; hop++) {
+        const host = new URL(url).host;
+        // Deliberately not this.client: the instance defaults carry an Origin,
+        // Referer and X-Same-Domain for the service host, which have no
+        // business on an accounts.google.com hop.
+        const response = await axios.get(url, {
+          headers: {
+            ...headers,
+            'User-Agent': USER_AGENT,
+            'Sec-Fetch-Site': hop === 0 ? 'none' : 'same-site',
+            'Cookie': cookieHeaderFor(jar, host),
+          },
+          maxRedirects: 0,
+          validateStatus: (status) => status >= 200 && status < 400,
+          timeout: 30000,
+        });
 
-      mergeSetCookies(jar, (response.headers['set-cookie'] as string[]) || []);
+        mergeSetCookies(jar, (response.headers['set-cookie'] as string[]) || [], host);
 
-      const location = response.headers['location'];
-      const isRedirect = response.status >= 300 && response.status < 400 && location;
-      if (!isRedirect) {
-        const cookieString = serializeCookieMap(jar);
-        if (cookieString !== before) this.applyCookies(cookieString);
-        return { status: response.status, data: response.data, finalUrl: url };
+        const location = response.headers['location'];
+        const isRedirect = response.status >= 300 && response.status < 400 && location;
+        if (!isRedirect) {
+          return { status: response.status, data: response.data, finalUrl: url };
+        }
+        url = new URL(String(location), url).toString();
       }
-      url = new URL(String(location), url).toString();
-    }
 
-    throw new Error(`Too many redirects while loading ${startUrl}`);
+      throw new Error(`Too many redirects while loading ${startUrl}`);
+    } finally {
+      const cookieString = serializeJar(jar);
+      if (cookieString !== before) this.applyCookies(cookieString);
+    }
   }
 
   /**
@@ -244,12 +210,10 @@ export class NotebookLMClient {
     const canRotate = jar.has('SID') && (jar.has('OSID') || (jar.has('APISID') && jar.has('SAPISID')));
     if (!canRotate) return false;
 
-    // Only send cookies a browser would route to accounts.google.com —
-    // OSID/__Secure-OSID are host-scoped to notebooklm.google.com and
-    // Google rejects requests that carry them cross-host.
-    const accountsJar = new Map(jar);
-    accountsJar.delete('OSID');
-    accountsJar.delete('__Secure-OSID');
+    // The jar knows which cookies are scoped to the service host, so this
+    // sends exactly what a browser would route to accounts.google.com.
+    // Carrying the host-scoped ones cross-host gets the request rejected.
+    const accountsCookies = cookieHeaderFor(jar, ACCOUNTS_HOST);
 
     // Google's JSPB parser varies in what it accepts for the first field;
     // try known encodings in order and stop at the first success.
@@ -258,13 +222,13 @@ export class NotebookLMClient {
     for (const body of bodies) {
       try {
         const response = await axios.post(
-          'https://accounts.google.com/RotateCookies',
+          `https://${ACCOUNTS_HOST}/RotateCookies`,
           body,
           {
             headers: {
               'Content-Type': 'application/json',
-              'Origin': 'https://accounts.google.com',
-              'Cookie': serializeCookieMap(accountsJar),
+              'Origin': `https://${ACCOUNTS_HOST}`,
+              'Cookie': accountsCookies,
               'User-Agent': USER_AGENT,
             },
             maxRedirects: 0,
@@ -282,20 +246,9 @@ export class NotebookLMClient {
         if (response.status !== 200) continue;
 
         const setCookieHeaders: string[] = response.headers['set-cookie'] || [];
-        let updated = false;
-        for (const header of setCookieHeaders) {
-          const pair = header.split(';')[0];
-          const eq = pair.indexOf('=');
-          if (eq <= 0) continue;
-          const name = pair.substring(0, eq).trim();
-          const value = pair.substring(eq + 1).trim();
-          if (!name || !value || value === '""') continue;
-          jar.set(name, value);
-          updated = true;
-        }
-        if (!updated) continue;
+        if (!mergeSetCookies(jar, setCookieHeaders, ACCOUNTS_HOST)) continue;
 
-        const cookieString = serializeCookieMap(jar);
+        const cookieString = serializeJar(jar);
         this.updateCookies(cookieString);
         if (this.cookieSaver) {
           try {

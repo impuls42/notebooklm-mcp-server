@@ -50,13 +50,43 @@ export const RPC_IDS = {
   GET_SHARE_STATUS: "JFMDGd",
 };
 
+const DEFAULT_BASE_URL = "https://notebook.google.com";
+
+/**
+ * Resolve the service host, rejecting an unusable override with a message
+ * that says what to do. Everything downstream concatenates paths onto this
+ * value and parses it for a hostname, so a bare host or a trailing path
+ * would fail far from the setting that caused it.
+ */
+function resolveBaseUrl(): string {
+  const configured = process.env.NOTEBOOKLM_BASE_URL?.trim();
+  if (!configured) return DEFAULT_BASE_URL;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    throw new Error(
+      `NOTEBOOKLM_BASE_URL must be an absolute URL including the scheme ` +
+      `(e.g. ${DEFAULT_BASE_URL}), but was "${configured}".`
+    );
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(
+      `NOTEBOOKLM_BASE_URL must use http or https (e.g. ${DEFAULT_BASE_URL}), ` +
+      `but was "${configured}".`
+    );
+  }
+  return parsed.origin;
+}
+
 /**
  * Service host. NotebookLM migrated from notebooklm.google.com to
  * notebook.google.com; the old host still answers but only by redirecting
  * through the sign-in flow, which a detached HTTP client reads as an expired
  * session. Overridable so a future migration does not require a release.
  */
-export const BASE_URL = process.env.NOTEBOOKLM_BASE_URL || "https://notebook.google.com";
+export const BASE_URL = resolveBaseUrl();
 export const BATCH_EXECUTE_PATH = "/_/LabsTailwindUi/data/batchexecute";
 export const QUERY_PATH = "/_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed";
 
