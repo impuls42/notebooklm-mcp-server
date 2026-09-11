@@ -84,6 +84,37 @@ function serializeCookieMap(map: Map<string, string>): string {
     .join('; ');
 }
 
+/**
+ * Cookies Google scopes to the service host itself. A browser never sends
+ * these to accounts.google.com, and Google rejects requests that do.
+ */
+const NOTEBOOK_HOST_SCOPED = ['OSID', '__Secure-OSID'];
+
+function cookiesForHost(jar: Map<string, string>, host: string): Map<string, string> {
+  if (host === new URL(BASE_URL).host) return jar;
+  const scoped = new Map(jar);
+  for (const name of NOTEBOOK_HOST_SCOPED) scoped.delete(name);
+  return scoped;
+}
+
+/**
+ * Fold a response's Set-Cookie headers into a jar, skipping deletions.
+ */
+function mergeSetCookies(jar: Map<string, string>, headers: string[]): boolean {
+  let changed = false;
+  for (const header of headers) {
+    const pair = header.split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.substring(0, eq).trim();
+    const value = pair.substring(eq + 1).trim();
+    if (!name || !value || value === '""') continue;
+    jar.set(name, value);
+    changed = true;
+  }
+  return changed;
+}
+
 export class NotebookLMClient {
   private client: AxiosInstance;
   private csrfToken: string | null = null;
@@ -138,6 +169,66 @@ export class NotebookLMClient {
 
   private currentCookies(): Map<string, string> {
     return parseCookieString(String(this.client.defaults.headers['Cookie'] || ''));
+  }
+
+  /**
+   * Apply a cookie string to this client and persist it, without resetting
+   * the initialization state the way updateCookies() does.
+   */
+  private applyCookies(cookieString: string): void {
+    this.client.defaults.headers['Cookie'] = cookieString;
+    if (this.cookieSaver) {
+      try {
+        this.cookieSaver(cookieString);
+      } catch { /* persistence is best-effort */ }
+    }
+  }
+
+  /**
+   * Follow a navigation the way a browser does: one hop at a time, feeding
+   * every Set-Cookie back into the jar before issuing the next request.
+   *
+   * This is what makes OSID obtainable. Google mints the host-scoped OSID
+   * cookie from an /accounts/SetOSID hop partway through the chain, so a
+   * client that sends a fixed Cookie header and lets the HTTP library follow
+   * redirects internally can never acquire it. Without OSID the chain ends on
+   * the sign-in page, which is indistinguishable from an expired session and
+   * was reported as one.
+   */
+  private async navigate(
+    startUrl: string,
+    headers: Record<string, string>,
+    maxHops = 10
+  ): Promise<{ status: number; data: any; finalUrl: string }> {
+    const jar = this.currentCookies();
+    const before = serializeCookieMap(jar);
+    let url = startUrl;
+
+    for (let hop = 0; hop < maxHops; hop++) {
+      const host = new URL(url).host;
+      const response = await this.client.get(url, {
+        baseURL: undefined,
+        headers: {
+          ...headers,
+          'Cookie': serializeCookieMap(cookiesForHost(jar, host)),
+        },
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      mergeSetCookies(jar, (response.headers['set-cookie'] as string[]) || []);
+
+      const location = response.headers['location'];
+      const isRedirect = response.status >= 300 && response.status < 400 && location;
+      if (!isRedirect) {
+        const cookieString = serializeCookieMap(jar);
+        if (cookieString !== before) this.applyCookies(cookieString);
+        return { status: response.status, data: response.data, finalUrl: url };
+      }
+      url = new URL(String(location), url).toString();
+    }
+
+    throw new Error(`Too many redirects while loading ${startUrl}`);
   }
 
   /**
@@ -254,32 +345,30 @@ export class NotebookLMClient {
     }
 
     try {
-      const response = await this.client.get('/', {
-        headers: {
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-        },
-        maxRedirects: 5,
+      const { data, finalUrl } = await this.navigate(`${BASE_URL}/`, {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
       });
 
-      // Check if redirected to login
-      const finalUrl = response.request?.res?.responseUrl || response.config?.url || '';
-      if (typeof finalUrl === 'string' && finalUrl.includes('accounts.google.com')) {
+      // Check if the chain ended on the sign-in page rather than the app.
+      if (finalUrl.includes('accounts.google.com')) {
         // Before giving up, try to refresh the rotating session token and
         // retry once — a stale/missing __Secure-1PSIDTS is recoverable.
         if (!_isRetry && await this.rotateCookies()) {
           return this.init(true);
         }
+        const landing = `${new URL(finalUrl).origin}${new URL(finalUrl).pathname}`;
         throw new AuthenticationError(
-          'Authentication expired. Run notebooklm-mcp-server auth to re-authenticate.'
+          `Authentication rejected: navigation from ${BASE_URL} ended at ${landing} ` +
+          `instead of the app. Run notebooklm-mcp-server auth to re-authenticate.`
         );
       }
 
-      const html = typeof response.data === 'string' ? response.data : '';
+      const html = typeof data === 'string' ? data : '';
       const csrfMatch = html.match(/"SNlM0e"\s*:\s*"([^"]+)"/);
       if (csrfMatch) {
         this.csrfToken = csrfMatch[1];

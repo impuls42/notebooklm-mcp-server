@@ -50,7 +50,13 @@ export const RPC_IDS = {
   GET_SHARE_STATUS: "JFMDGd",
 };
 
-export const BASE_URL = "https://notebooklm.google.com";
+/**
+ * Service host. NotebookLM migrated from notebooklm.google.com to
+ * notebook.google.com; the old host still answers but only by redirecting
+ * through the sign-in flow, which a detached HTTP client reads as an expired
+ * session. Overridable so a future migration does not require a release.
+ */
+export const BASE_URL = process.env.NOTEBOOKLM_BASE_URL || "https://notebook.google.com";
 export const BATCH_EXECUTE_PATH = "/_/LabsTailwindUi/data/batchexecute";
 export const QUERY_PATH = "/_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed";
 

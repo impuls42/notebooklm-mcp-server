@@ -2,6 +2,34 @@ import { chromium } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import os from 'os';
+import { BASE_URL } from './constants.js';
+
+const BASE_HOST = new URL(BASE_URL).host;
+
+/**
+ * Login can land on either the current service host or the legacy one, since
+ * Google still redirects between them mid-flow.
+ */
+const NOTEBOOK_HOSTS = [BASE_HOST, 'notebook.google.com', 'notebooklm.google.com'];
+const isNotebookHost = (host: string): boolean => NOTEBOOK_HOSTS.includes(host);
+
+function parseCookieString(cookieString: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const part of cookieString.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    const name = part.substring(0, eq).trim();
+    const value = part.substring(eq + 1).trim();
+    if (name) map.set(name, value);
+  }
+  return map;
+}
+
+function serializeCookieMap(map: Map<string, string>): string {
+  return Array.from(map.entries())
+    .map(([name, value]) => `${name}=${value}`)
+    .join('; ');
+}
 
 export class AuthManager {
   private authPath: string;
@@ -21,7 +49,7 @@ export class AuthManager {
     const page = await context.newPage();
 
     if (onStatus) onStatus('Loading NotebookLM...');
-    await page.goto('https://notebooklm.google.com');
+    await page.goto(BASE_URL);
 
     if (onStatus) onStatus('Waiting for Google Login...');
     
@@ -31,7 +59,7 @@ export class AuthManager {
       await Promise.race([
         // 1. Entering the app (notebook view or dashboard)
         page.waitForURL(url => 
-          url.origin === 'https://notebooklm.google.com' && 
+          isNotebookHost(url.host) && 
           (url.pathname.includes('/notebook') || url.pathname === '/'), 
           { timeout: 300000 }
         ).then(() => { isDone = true; }),
@@ -51,7 +79,7 @@ export class AuthManager {
             try {
               const cookies = await context.cookies();
               const sid = cookies.find(c => c.name === '__Secure-3PSID' || c.name === 'SID');
-              if (sid && page.url().includes('notebooklm.google.com')) {
+              if (sid && isNotebookHost(new URL(page.url()).host)) {
                 isDone = true;
                 resolve(true);
               } else {
@@ -113,12 +141,12 @@ export class AuthManager {
 
     if (onStatus) onStatus('Extracting secure session cookies...');
 
-    // CRITICAL: Filter cookies to only those that match notebooklm.google.com
+    // CRITICAL: Filter cookies to only those that match the service host
     // Playwright's context.cookies() without URL returns ALL cookies from ALL domains
     // (including accounts.google.com, youtube.com, etc.), causing duplicate cookie names
     // and conflicting session values. CDP's Network.getCookies (used by Python) only
     // returns cookies for the current page URL. We match that behavior here.
-    const allCookies = await context.cookies('https://notebooklm.google.com');
+    const allCookies = await context.cookies(BASE_URL);
     
     // Deduplicate by name (keep last value, like browsers do)
     const cookieMap = new Map<string, string>();
@@ -151,21 +179,35 @@ export class AuthManager {
       console.error('Warning: Google did not issue __Secure-1PSIDTS during login. The server will attempt to mint it via RotateCookies on first use.');
     }
 
-    console.error(`Extracted ${cookieMap.size} unique cookies for notebooklm.google.com`);
+    console.error(`Extracted ${cookieMap.size} unique cookies for ${BASE_HOST}`);
 
-    this.saveCookies(cookieString);
+    // A fresh login replaces the stored jar outright: the user may have signed
+    // in as a different account, and merging would carry the old one forward.
+    this.saveCookies(cookieString, { replace: true });
 
     console.error(`Authentication successful! Cookies saved to ${this.authPath}`);
     await browser.close();
   }
 
   /**
-   * Persist a cookie string to auth.json. Also used by the MCP server to save
-   * refreshed cookies after a successful RotateCookies recovery.
+   * Persist a cookie string to auth.json, merging by cookie name over whatever
+   * is already stored. Also used by the MCP server to save refreshed cookies
+   * after a RotateCookies recovery or an OSID-granting redirect.
+   *
+   * Merging rather than overwriting keeps the failure path non-destructive: a
+   * partial in-memory jar used to rewrite the file wholesale and could drop a
+   * still-valid cookie that nothing would ever re-acquire. Pass replace:true
+   * for a completed browser login, which is authoritative and must not
+   * inherit cookies from a previously authenticated account.
    */
-  saveCookies(cookieString: string): void {
+  saveCookies(cookieString: string, options: { replace?: boolean } = {}): void {
+    const merged = options.replace ? new Map<string, string>() : this.readStoredCookies();
+    for (const [name, value] of parseCookieString(cookieString)) {
+      merged.set(name, value);
+    }
+
     const authData = {
-      cookies: cookieString,
+      cookies: serializeCookieMap(merged),
       updatedAt: new Date().toISOString()
     };
 
@@ -177,15 +219,31 @@ export class AuthManager {
   }
 
   /**
+   * Cookies currently on disk, or an empty jar if there are none to read.
+   */
+  private readStoredCookies(): Map<string, string> {
+    try {
+      const data = JSON.parse(fs.readFileSync(this.authPath, 'utf-8'));
+      return parseCookieString(String(data.cookies || ''));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
    * Verify that the saved cookies actually authenticate against the API — not
-   * just that a browser login completed. A browser session can be Device Bound
-   * (DBSC): the cookies work inside the browser that holds the device key, but
-   * are rejected when replayed by a detached HTTP client. This check catches
-   * that so `auth` never claims success for cookies the server can't use.
+   * just that a browser login completed, which proves nothing about a detached
+   * HTTP client. This check exists so `auth` never claims success for cookies
+   * the server cannot use.
+   *
+   * Do not read a rejection as proof of Device Bound Session Credentials.
+   * Every rejection reported so far has had a mundane client-side cause (a
+   * missing rotating token, a stale service host, a dropped OSID cookie), and
+   * naming DBSC here previously sent users chasing an unfixable phantom.
    *
    * Returns a structured verdict:
    *  - 'ok'         — the API accepted the cookies (optionally names one notebook)
-   *  - 'rejected'   — cookies exported but the API rejects them (typically DBSC)
+   *  - 'rejected'   — cookies exported but the API rejects them
    *  - 'no_session' — nothing saved to validate
    *  - 'error'      — an unexpected (non-auth) failure, e.g. network
    */
@@ -202,6 +260,10 @@ export class AuthManager {
     // auth startup path unless a validation actually runs.
     const { NotebookLMClient, AuthenticationError } = await import('./client.js');
     const client = new NotebookLMClient(cookies);
+    // Persist anything the session pickup earns along the way, notably the
+    // host-scoped OSID cookie Google grants mid-redirect, so the server does
+    // not have to re-acquire it on first use.
+    client.setCookieSaver((refreshed) => this.saveCookies(refreshed));
     try {
       const notebooks = await client.listNotebooks();
       const first = notebooks[0]?.title;
