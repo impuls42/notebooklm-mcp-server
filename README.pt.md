@@ -66,7 +66,7 @@ npm install -g notebooklm-mcp-server
 
 ```bash
 npx -y notebooklm-mcp-server auth   # authenticate
-npx -y notebooklm-mcp-server start  # run the server
+npx -y notebooklm-mcp-server server  # run the server
 ```
 
 ## 🔑 Autenticação
@@ -84,13 +84,23 @@ npx notebooklm-mcp-server auth
 > [!TIP]
 > Se a sessão expirar em algum momento, execute `npx notebooklm-mcp-server auth` novamente em um terminal e depois chame a ferramenta MCP `refresh_auth` (ou simplesmente reinicie o seu cliente) para carregar os novos cookies sem reconfigurar nada.
 
+## ⚙️ Configuração
+
+| Variável | Padrão | Finalidade |
+|----------|--------|------------|
+| `NOTEBOOKLM_BASE_URL` | `https://notebook.google.com` | Host do serviço com que o cliente se comunica. Substitua-o se o Google migrar o domínio novamente. O valor é lido uma única vez na inicialização, então reinicie o servidor depois de alterá-lo. |
+
+Os cookies de sessão ficam à parte em `~/.notebooklm-mcp/auth.json`, gravados pelo comando `auth`.
+
 ## ⚡ Conecte o seu cliente de IA
 
 ### 🤖 Claude Code
 
 ```bash
-claude mcp add notebooklm -- npx -y notebooklm-mcp-server start
+claude mcp add notebooklm -s user -- npx -y notebooklm-mcp-server server
 ```
+
+`-s user` deixa o servidor disponível em todos os projetos da máquina. Use `-s local` para limitá-lo ao diretório atual, ou `-s project` para gravar um `.mcp.json` compartilhado no repositório.
 
 ### 💬 Claude Desktop
 
@@ -101,7 +111,7 @@ Adicione ao `claude_desktop_config.json` (Settings → Developer → Edit Config
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -119,7 +129,7 @@ A CLI do Antigravity gerencia servidores MCP por meio de um arquivo de configura
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -134,7 +144,7 @@ A IDE lê os mesmos arquivos de configuração da CLI (`~/.gemini/config/mcp_con
 ### 💎 Gemini CLI
 
 ```bash
-gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server start
+gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server server
 ```
 
 ### ⌨️ Cursor
@@ -146,7 +156,7 @@ Adicione ao `.cursor/mcp.json` no seu projeto (ou ao `~/.cursor/mcp.json` para u
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -282,7 +292,7 @@ O agente encadeia `notebook_add_url` ×5 → `report_create` → `studio_poll` �
 
 | Sintoma | Solução |
 |---------|-----|
-| `auth` avisa que a API rejeitou seus cookies logo após o login | Sua conta do Google aplica **Device Bound Session Credentials (DBSC)** — ativado por padrão no Workspace e na maioria das contas pessoais. O DBSC vincula a sessão a uma chave do dispositivo, então os cookies exportados do navegador são recusados pela API. Clientes baseados em extração de cookies não conseguem contornar isso; use uma conta do Google sem DBSC. |
+| `auth` avisa que a API rejeitou seus cookies logo após o login | Execute `auth` mais uma vez: o token rotativo `__Secure-1PSIDTS` pode chegar depois do login. Se persistir, o host do serviço pode ter mudado — substitua-o com `NOTEBOOKLM_BASE_URL`. A resposta da API indica onde a requisição parou; inclua-a no relato do problema. Isto **não** é DBSC: cookies reenviados continuam autenticando, e todas as rejeições relatadas até agora tinham causa no cliente. |
 | `Authentication expired` logo após o login | Atualize para ≥ 3.0.8 — versões anteriores não capturavam o token rotativo `__Secure-1PSIDTS` do Google. O servidor agora o captura e o renova automaticamente. |
 | `Authentication failed` após semanas de uso | As sessões do Google acabam expirando. Execute `npx notebooklm-mcp-server auth` e depois chame a ferramenta `refresh_auth`. |
 | Geração do Studio parada em `pending` | Fontes longas demoram um pouco — continue consultando `studio_poll`; áudio/vídeo podem levar vários minutos. |

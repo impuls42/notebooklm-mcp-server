@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { AuthManager } from './auth.js';
+import { BASE_URL } from './constants.js';
 import chalk from 'chalk';
 import ora from 'ora';
 
@@ -17,8 +18,8 @@ export async function runAuthCli() {
     });
 
     // A completed browser login does not guarantee the exported cookies work
-    // in the HTTP client (DBSC-bound sessions look identical until the first
-    // real API call). Verify before declaring success.
+    // in the HTTP client; the two only diverge on the first real API call.
+    // Verify before declaring success.
     console.error(chalk.blue('[Status] Verifying the session against the API...'));
     const check = await auth.validateSavedSession();
 
@@ -31,14 +32,12 @@ export async function runAuthCli() {
 
     if (check.status === 'rejected') {
       console.error('\n' + chalk.yellow.bold('⚠  Login worked in the browser, but the API rejected the exported cookies.'));
-      console.error(chalk.white('This almost always means your Google account uses Device Bound Session'));
-      console.error(chalk.white('Credentials (DBSC), now default-on for Workspace and most personal accounts.'));
-      console.error(chalk.white('DBSC ties the session to a device-held key, so cookies copied out of the'));
-      console.error(chalk.white('browser are refused by NotebookLM even seconds after a successful login.'));
       console.error(chalk.gray(`\nAPI response: ${check.detail}`));
-      console.error(chalk.white('\nWhat you can do:'));
-      console.error(chalk.white('  • Use a Google account without DBSC enforcement, if you have one.'));
-      console.error(chalk.white('  • Cookie-extraction clients like this one cannot bypass DBSC.'));
+      console.error(chalk.white('\nWhat to check:'));
+      console.error(chalk.white('  • Re-run auth once more; the rotating session token can race the login.'));
+      console.error(chalk.white('  • Confirm the service host is current. Override it with NOTEBOOKLM_BASE_URL'));
+      console.error(chalk.white(`    if Google has moved again (currently ${BASE_URL}).`));
+      console.error(chalk.white('  • Report the API response above; it names where the request landed.'));
       process.exit(2);
     }
 

@@ -66,7 +66,7 @@ npm install -g notebooklm-mcp-server
 
 ```bash
 npx -y notebooklm-mcp-server auth   # authenticate
-npx -y notebooklm-mcp-server start  # run the server
+npx -y notebooklm-mcp-server server  # run the server
 ```
 
 ## 🔑 Authentification
@@ -84,13 +84,23 @@ npx notebooklm-mcp-server auth
 > [!TIP]
 > Si la session vient à expirer, relancez `npx notebooklm-mcp-server auth` dans un terminal, puis appelez l'outil MCP `refresh_auth` (ou redémarrez simplement votre client) pour récupérer les nouveaux cookies sans rien reconfigurer.
 
+## ⚙️ Configuration
+
+| Variable | Valeur par défaut | Rôle |
+|----------|-------------------|------|
+| `NOTEBOOKLM_BASE_URL` | `https://notebook.google.com` | Hôte du service contacté par le client. Remplacez-le si Google migre à nouveau le domaine. La valeur est lue une seule fois au démarrage : redémarrez le serveur après l'avoir modifiée. |
+
+Les cookies de session sont stockés à part dans `~/.notebooklm-mcp/auth.json`, écrits par la commande `auth`.
+
 ## ⚡ Connectez votre client IA
 
 ### 🤖 Claude Code
 
 ```bash
-claude mcp add notebooklm -- npx -y notebooklm-mcp-server start
+claude mcp add notebooklm -s user -- npx -y notebooklm-mcp-server server
 ```
+
+`-s user` rend le serveur disponible dans tous les projets de la machine. Utilisez `-s local` pour le limiter au répertoire courant, ou `-s project` pour écrire un `.mcp.json` partagé dans le dépôt.
 
 ### 💬 Claude Desktop
 
@@ -101,7 +111,7 @@ Ajoutez ceci à `claude_desktop_config.json` (Paramètres → Développeur → M
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -119,7 +129,7 @@ La CLI d'Antigravity gère les serveurs MCP via un fichier de configuration JSON
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -134,7 +144,7 @@ L'IDE lit les mêmes fichiers de configuration que la CLI (`~/.gemini/config/mcp
 ### 💎 Gemini CLI
 
 ```bash
-gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server start
+gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server server
 ```
 
 ### ⌨️ Cursor
@@ -146,7 +156,7 @@ Ajoutez ceci à `.cursor/mcp.json` dans votre projet (ou à `~/.cursor/mcp.json`
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -282,7 +292,7 @@ L'agent enchaîne `notebook_add_url` ×5 → `report_create` → `studio_poll` �
 
 | Symptôme | Solution |
 |---------|-----|
-| `auth` signale que l'API a rejeté vos cookies juste après la connexion | Votre compte Google applique les **Device Bound Session Credentials (DBSC)** — activés par défaut sur Workspace et la plupart des comptes personnels. DBSC lie la session à une clé détenue par l'appareil, si bien que les cookies exportés du navigateur sont refusés par l'API. Les clients par extraction de cookies ne peuvent pas le contourner ; utilisez un compte Google sans DBSC. |
+| `auth` signale que l'API a rejeté vos cookies juste après la connexion | Relancez `auth` une fois : le jeton rotatif `__Secure-1PSIDTS` peut arriver après la connexion. Si le problème persiste, l'hôte du service a peut-être changé — remplacez-le via `NOTEBOOKLM_BASE_URL`. La réponse de l'API indique où la requête a abouti ; joignez-la à votre rapport. Ce n'est **pas** DBSC : les cookies rejoués authentifient toujours, et tous les rejets signalés jusqu'ici avaient une cause côté client. |
 | `Authentication expired` juste après la connexion | Mettez à jour vers ≥ 3.0.8 — les versions antérieures ne capturaient pas le jeton rotatif `__Secure-1PSIDTS` de Google. Le serveur le capture et le rafraîchit désormais automatiquement. |
 | `Authentication failed` après des semaines d'utilisation | Les sessions Google finissent par expirer. Lancez `npx notebooklm-mcp-server auth`, puis appelez l'outil `refresh_auth`. |
 | Génération studio bloquée sur `pending` | Les sources longues prennent du temps — continuez d'interroger `studio_poll` ; l'audio et la vidéo peuvent prendre plusieurs minutes. |

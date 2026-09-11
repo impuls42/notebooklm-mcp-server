@@ -66,7 +66,7 @@ npm install -g notebooklm-mcp-server
 
 ```bash
 npx -y notebooklm-mcp-server auth   # authenticate
-npx -y notebooklm-mcp-server start  # run the server
+npx -y notebooklm-mcp-server server  # run the server
 ```
 
 ## 🔑 Authentication
@@ -84,13 +84,23 @@ npx notebooklm-mcp-server auth
 > [!TIP]
 > If the session ever expires, run `npx notebooklm-mcp-server auth` again in a terminal, then call the `refresh_auth` MCP tool (or just restart your client) to pick up the new cookies without reconfiguring anything.
 
+## ⚙️ Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NOTEBOOKLM_BASE_URL` | `https://notebook.google.com` | Service host the client talks to. Override it if Google migrates the domain again. The value is read once at startup, so restart the server after changing it. |
+
+Session cookies live separately in `~/.notebooklm-mcp/auth.json`, written by the `auth` command.
+
 ## ⚡ Connect Your AI Client
 
 ### 🤖 Claude Code
 
 ```bash
-claude mcp add notebooklm -- npx -y notebooklm-mcp-server start
+claude mcp add notebooklm -s user -- npx -y notebooklm-mcp-server server
 ```
+
+`-s user` makes the server available in every project on the machine. Use `-s local` to limit it to the current directory, or `-s project` to write a shared `.mcp.json` into the repo.
 
 ### 💬 Claude Desktop
 
@@ -101,7 +111,7 @@ Add to `claude_desktop_config.json` (Settings → Developer → Edit Config):
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -119,7 +129,7 @@ Antigravity's CLI manages MCP servers through a JSON config file:
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -134,7 +144,7 @@ The IDE reads the same config files as the CLI (`~/.gemini/config/mcp_config.jso
 ### 💎 Gemini CLI
 
 ```bash
-gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server start
+gemini mcp add notebooklm --scope user -- npx -y notebooklm-mcp-server server
 ```
 
 ### ⌨️ Cursor
@@ -146,7 +156,7 @@ Add to `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` globally):
   "mcpServers": {
     "notebooklm": {
       "command": "npx",
-      "args": ["-y", "notebooklm-mcp-server", "start"]
+      "args": ["-y", "notebooklm-mcp-server", "server"]
     }
   }
 }
@@ -282,7 +292,7 @@ The agent chains `notebook_add_url` ×5 → `report_create` → `studio_poll` �
 
 | Symptom | Fix |
 |---------|-----|
-| `auth` warns the API rejected your cookies right after login | Your Google account enforces **Device Bound Session Credentials (DBSC)** — default-on for Workspace and most personal accounts. DBSC ties the session to a device-held key, so cookies exported from the browser are refused by the API. Cookie-extraction clients cannot bypass this; use a Google account without DBSC enforcement. |
+| `auth` warns the API rejected your cookies right after login | Re-run `auth` once: the rotating `__Secure-1PSIDTS` token can race the login. If it persists, the service host may have moved — override it with `NOTEBOOKLM_BASE_URL`. The API response names where the request landed; include it in a bug report. This is **not** DBSC — replayed cookies still authenticate, and every rejection reported so far has had a client-side cause. |
 | `Authentication expired` right after logging in | Update to ≥ 3.0.8 — older versions missed Google's rotating `__Secure-1PSIDTS` token. The server now captures and auto-refreshes it. |
 | `Authentication failed` after weeks of use | Google sessions eventually expire. Run `npx notebooklm-mcp-server auth`, then call the `refresh_auth` tool. |
 | Studio generation stuck on `pending` | Long sources take a while — keep polling `studio_poll`; audio/video can take several minutes. |
