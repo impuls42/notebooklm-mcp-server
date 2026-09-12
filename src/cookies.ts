@@ -67,6 +67,16 @@ export function parseCookieString(cookieString: string, host = serviceHost()): C
 }
 
 /**
+ * Whether an entry survives a write to auth.json. The stored format is a flat
+ * `name=value` string with no room for attributes, so only cookies this client
+ * can use against the service host are worth keeping: domain cookies, and the
+ * service host's own scoped ones.
+ */
+function isStorable(entry: JarEntry, host = serviceHost()): boolean {
+  return !entry.host || entry.host === host;
+}
+
+/**
  * Serialize for storage: domain cookies plus the service host's own scoped
  * cookies. Another host's scoped cookies are useless to this client and
  * would be replayed to the wrong origin, so they are dropped.
@@ -74,7 +84,7 @@ export function parseCookieString(cookieString: string, host = serviceHost()): C
 export function serializeJar(jar: CookieJar): string {
   const host = serviceHost();
   return Array.from(jar.entries())
-    .filter(([, entry]) => !entry.host || entry.host === host)
+    .filter(([, entry]) => isStorable(entry, host))
     .map(([name, entry]) => `${name}=${entry.value}`)
     .join('; ');
 }
@@ -118,8 +128,26 @@ export function mergeSetCookies(jar: CookieJar, headers: string[], host: string)
 
     // A __Host- cookie may not carry Domain, and an absent Domain means the
     // cookie belongs to the issuing host and goes nowhere else.
-    const scoped = !domain || name.startsWith('__Host-');
-    jar.set(name, scoped ? { value, host } : { value, domain });
+    const hostOnly = !domain || name.startsWith('__Host-');
+    if (!hostOnly) {
+      jar.set(name, { value, domain });
+      changed = true;
+      continue;
+    }
+
+    // Narrowing a cookie this client can store down to some other host would
+    // evict it from the jar and from auth.json on the next write, since the
+    // stored format cannot express the narrower scope. Refresh the value and
+    // keep the reach it already had. __Host- names are exempt: the prefix
+    // forbids a Domain, so they were never storable to begin with.
+    const existing = jar.get(name);
+    const wouldEvict =
+      host !== serviceHost() &&
+      !name.startsWith('__Host-') &&
+      existing !== undefined &&
+      isStorable(existing);
+
+    jar.set(name, wouldEvict ? { ...existing!, value } : { value, host });
     changed = true;
   }
   return changed;

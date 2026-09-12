@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { AuthManager } from './auth.js';
 import { checkForUpdates } from './update.js';
 import { VERSION } from './version.js';
 
+// Nothing here may statically import a module that validates configuration.
+// Reading NOTEBOOKLM_BASE_URL throws on a malformed value, and `--help` and
+// `--version` have to keep working so the user can find out what to set. The
+// command handlers below import those modules once a command actually runs.
 const program = new Command();
 
 program
